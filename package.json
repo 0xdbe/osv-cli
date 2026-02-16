@@ -1,0 +1,20 @@
+{
+  "name": "deps-dev-cli",
+  "version": "1.0.0",
+  "description": "CLI Node.js pour interroger les vulnérabilités d'un package npm via OSV",
+  "type": "module",
+  "bin": {
+    "vulnerability": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli.js"
+  },
+  "dependencies": {
+    "cvss": "^1.0.5",
+    "commander": "^12.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

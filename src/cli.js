@@ -6,10 +6,26 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const cvss = require("cvss");
 
-const NPM_ECOSYSTEM = "npm";
 const DEPS_DEV_BASE_URL = "https://api.deps.dev/v3";
 const OSV_QUERY_BATCH_URL = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_DETAILS_BASE_URL = "https://api.osv.dev/v1/vulns";
+
+const SUPPORTED_ECOSYSTEMS = {
+  npm: {
+    depsDevSystem: "npm",
+    osvEcosystem: "npm"
+  },
+  java: {
+    depsDevSystem: "maven",
+    osvEcosystem: "Maven"
+  },
+  pypi: {
+    depsDevSystem: "pypi",
+    osvEcosystem: "PyPI"
+  }
+};
+
+const DEFAULT_ECOSYSTEM = "npm";
 
 function normalizeInput(name) {
   if (!name || typeof name !== "string") {
@@ -27,6 +43,33 @@ function encodeVersion(version) {
   return encodeURIComponent(version);
 }
 
+function normalizeEcosystem(ecosystem) {
+  if (!ecosystem || typeof ecosystem !== "string") {
+    return DEFAULT_ECOSYSTEM;
+  }
+
+  const normalized = ecosystem.trim().toLowerCase();
+
+  if (Object.hasOwn(SUPPORTED_ECOSYSTEMS, normalized)) {
+    return normalized;
+  }
+
+  return "";
+}
+
+function resolveEcosystemConfig(ecosystem) {
+  const normalized = normalizeEcosystem(ecosystem);
+
+  if (!normalized) {
+    return null;
+  }
+
+  return {
+    name: normalized,
+    ...SUPPORTED_ECOSYSTEMS[normalized]
+  };
+}
+
 async function fetchJson(url) {
   const response = await fetch(url);
 
@@ -37,8 +80,8 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function resolveDefaultVersion(packageName) {
-  const url = `${DEPS_DEV_BASE_URL}/systems/npm/packages/${encodePackageName(packageName)}`;
+async function resolveDefaultVersion(packageName, ecosystemConfig) {
+  const url = `${DEPS_DEV_BASE_URL}/systems/${ecosystemConfig.depsDevSystem}/packages/${encodePackageName(packageName)}`;
   const data = await fetchJson(url);
   const versions = Array.isArray(data.versions) ? data.versions : [];
 
@@ -67,16 +110,16 @@ async function resolveDefaultVersion(packageName) {
   return sorted[0].version;
 }
 
-async function resolveRootVersion(packageName, inputVersion) {
+async function resolveRootVersion(packageName, inputVersion, ecosystemConfig) {
   if (inputVersion) {
     return inputVersion;
   }
 
-  return resolveDefaultVersion(packageName);
+  return resolveDefaultVersion(packageName, ecosystemConfig);
 }
 
-async function fetchDependencyGraph(packageName, version) {
-  const url = `${DEPS_DEV_BASE_URL}/systems/npm/packages/${encodePackageName(packageName)}/versions/${encodeVersion(version)}:dependencies`;
+async function fetchDependencyGraph(packageName, version, ecosystemConfig) {
+  const url = `${DEPS_DEV_BASE_URL}/systems/${ecosystemConfig.depsDevSystem}/packages/${encodePackageName(packageName)}/versions/${encodeVersion(version)}:dependencies`;
   const data = await fetchJson(url);
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
   const uniquePackages = new Map();
@@ -98,25 +141,25 @@ async function fetchDependencyGraph(packageName, version) {
   return Array.from(uniquePackages.values());
 }
 
-function buildOsvBatchBody(packages) {
+function buildOsvBatchBody(packages, ecosystemConfig) {
   return {
     queries: packages.map((dependency) => ({
       package: {
         name: dependency.name,
-        ecosystem: NPM_ECOSYSTEM
+        ecosystem: ecosystemConfig.osvEcosystem
       },
       version: dependency.version
     }))
   };
 }
 
-async function fetchVulnerabilitiesBatch(packages) {
+async function fetchVulnerabilitiesBatch(packages, ecosystemConfig) {
   const response = await fetch(OSV_QUERY_BATCH_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(buildOsvBatchBody(packages))
+    body: JSON.stringify(buildOsvBatchBody(packages, ecosystemConfig))
   });
 
   if (!response.ok) {
@@ -368,9 +411,10 @@ function formatSummary(scannedPackages = [], rootName, rootVersion) {
   ].join("\n");
 }
 
-async function runVulnerabilityCheck(inputName, inputVersion) {
+async function runVulnerabilityCheck(inputName, inputVersion, inputEcosystem) {
   const name = normalizeInput(inputName);
   const requestedVersion = normalizeInput(inputVersion);
+  const ecosystemConfig = resolveEcosystemConfig(inputEcosystem);
 
   if (!name) {
     console.error("❌ Nom de package manquant.");
@@ -378,10 +422,16 @@ async function runVulnerabilityCheck(inputName, inputVersion) {
     return;
   }
 
+  if (!ecosystemConfig) {
+    console.error("❌ Écosystème invalide. Valeurs autorisées: npm, java, pypi.");
+    process.exitCode = 1;
+    return;
+  }
+
   try {
-    const rootVersion = await resolveRootVersion(name, requestedVersion);
-    const dependencies = await fetchDependencyGraph(name, rootVersion);
-    const scannedPackages = await fetchVulnerabilitiesBatch(dependencies);
+    const rootVersion = await resolveRootVersion(name, requestedVersion, ecosystemConfig);
+    const dependencies = await fetchDependencyGraph(name, rootVersion, ecosystemConfig);
+    const scannedPackages = await fetchVulnerabilitiesBatch(dependencies, ecosystemConfig);
     const cvssScoreByGhsa = await fetchCvssDataByGhsa(scannedPackages);
 
     console.log(buildEmojiSummary(scannedPackages, cvssScoreByGhsa));
@@ -404,11 +454,12 @@ const program = new Command();
 
 program
   .name("vulnerability")
-  .description("Vérifie les vulnérabilités connues d'un package npm et ses dépendances via deps.dev + OSV")
-  .argument("<package-name>", "Nom du package npm à analyser")
-  .option("-v, --version <version>", "Version du package npm à analyser")
+  .description("Vérifie les vulnérabilités connues d'un package et ses dépendances via deps.dev + OSV")
+  .argument("<package-name>", "Nom du package à analyser")
+  .option("-v, --version <version>", "Version du package à analyser")
+  .option("-e, --ecosystem <ecosystem>", "Écosystème du package (npm, java, pypi)", DEFAULT_ECOSYSTEM)
   .action(async (packageName, options) => {
-    await runVulnerabilityCheck(packageName, options.version);
+    await runVulnerabilityCheck(packageName, options.version, options.ecosystem);
   });
 
 program.parseAsync(process.argv);

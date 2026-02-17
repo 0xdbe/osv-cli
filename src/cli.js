@@ -240,6 +240,54 @@ function normalizeVectorForScoring(vector) {
   return vector;
 }
 
+function extractDirectCvssScore(vector) {
+  if (typeof vector !== "string") {
+    return Number.NaN;
+  }
+
+  const trimmed = vector.trim();
+
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  const cvssV4Match = trimmed.match(/^CVSS:(\d+(?:\.\d+)?)\//i);
+
+  if (cvssV4Match && trimmed.toUpperCase().startsWith("CVSS:4.0/")) {
+    return Number(cvssV4Match[1]);
+  }
+
+  return Number.NaN;
+}
+
+function cvssLevelFromNumericScore(score) {
+  if (!Number.isFinite(score) || score < 0) {
+    return "N/A";
+  }
+
+  if (score === 0) {
+    return "None";
+  }
+
+  if (score <= 3.9) {
+    return "Low";
+  }
+
+  if (score <= 6.9) {
+    return "Medium";
+  }
+
+  if (score <= 8.9) {
+    return "High";
+  }
+
+  if (score <= 10) {
+    return "Critical";
+  }
+
+  return "N/A";
+}
+
 function computeCvssScoreAndLevel(vulnDetails) {
   const vector = extractCvssVector(vulnDetails);
 
@@ -247,6 +295,15 @@ function computeCvssScoreAndLevel(vulnDetails) {
     return {
       score: "N/A",
       level: normalizeCvssLevel(vulnDetails?.database_specific?.severity)
+    };
+  }
+
+  const directScore = extractDirectCvssScore(vector);
+
+  if (Number.isFinite(directScore)) {
+    return {
+      score: directScore.toFixed(1),
+      level: cvssLevelFromNumericScore(directScore)
     };
   }
 

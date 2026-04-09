@@ -1,14 +1,10 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-const cvss = require("cvss");
+import { computeCvssScoreAndLevel } from "./cvss.js";
+import { fetchVulnerabilityDetails, queryVulnerabilitiesBatch } from "./osv-client.js";
 
 const DEPS_DEV_BASE_URL = "https://api.deps.dev/v3";
-const OSV_QUERY_BATCH_URL = "https://api.osv.dev/v1/querybatch";
-const OSV_VULN_DETAILS_BASE_URL = "https://api.osv.dev/v1/vulns";
 
 const SUPPORTED_ECOSYSTEMS = {
   npm: {
@@ -137,197 +133,11 @@ async function fetchDependencyGraph(packageName, version, ecosystemConfig) {
       version: nodeVersion
     });
   }
-
   return Array.from(uniquePackages.values());
 }
 
-function buildOsvBatchBody(packages, ecosystemConfig) {
-  return {
-    queries: packages.map((dependency) => ({
-      package: {
-        name: dependency.name,
-        ecosystem: ecosystemConfig.osvEcosystem
-      },
-      version: dependency.version
-    }))
-  };
-}
-
 async function fetchVulnerabilitiesBatch(packages, ecosystemConfig) {
-  const response = await fetch(OSV_QUERY_BATCH_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(buildOsvBatchBody(packages, ecosystemConfig))
-  });
-
-  if (!response.ok) {
-    throw new Error(`Erreur API OSV (${response.status})`);
-  }
-
-  const data = await response.json();
-  const results = Array.isArray(data.results) ? data.results : [];
-
-  return packages.map((dependency, index) => ({
-    ...dependency,
-    vulns: Array.isArray(results[index]?.vulns) ? results[index].vulns : []
-  }));
-}
-
-function extractCvssVector(vulnDetails) {
-  const severityEntries = Array.isArray(vulnDetails?.severity) ? vulnDetails.severity : [];
-  const cvssV3Entry = severityEntries.find((entry) => typeof entry?.type === "string" && entry.type.toUpperCase().startsWith("CVSS_V3"));
-
-  if (cvssV3Entry?.score && typeof cvssV3Entry.score === "string") {
-    return cvssV3Entry.score;
-  }
-
-  const genericCvssEntry = severityEntries.find((entry) => typeof entry?.type === "string" && entry.type.toUpperCase().startsWith("CVSS"));
-
-  if (genericCvssEntry?.score && typeof genericCvssEntry.score === "string") {
-    return genericCvssEntry.score;
-  }
-
-  const databaseCvss = vulnDetails?.database_specific?.cvss;
-
-  if (typeof databaseCvss === "string" && databaseCvss.trim()) {
-    return databaseCvss;
-  }
-
-  return "";
-}
-
-function normalizeCvssLevel(rawLevel) {
-  if (typeof rawLevel !== "string" || !rawLevel.trim()) {
-    return "N/A";
-  }
-
-  const level = rawLevel.trim().toLowerCase();
-
-  if (level === "none") {
-    return "None";
-  }
-
-  if (level === "low") {
-    return "Low";
-  }
-
-  if (level === "medium") {
-    return "Medium";
-  }
-
-  if (level === "high") {
-    return "High";
-  }
-
-  if (level === "critical") {
-    return "Critical";
-  }
-
-  return "N/A";
-}
-
-function normalizeVectorForScoring(vector) {
-  if (typeof vector !== "string") {
-    return "";
-  }
-
-  if (vector.startsWith("CVSS:3.1/")) {
-    return vector.replace("CVSS:3.1/", "CVSS:3.0/");
-  }
-
-  return vector;
-}
-
-function extractDirectCvssScore(vector) {
-  if (typeof vector !== "string") {
-    return Number.NaN;
-  }
-
-  const trimmed = vector.trim();
-
-  if (/^\d+(\.\d+)?$/.test(trimmed)) {
-    return Number(trimmed);
-  }
-
-  const cvssV4Match = trimmed.match(/^CVSS:(\d+(?:\.\d+)?)\//i);
-
-  if (cvssV4Match && trimmed.toUpperCase().startsWith("CVSS:4.0/")) {
-    return Number(cvssV4Match[1]);
-  }
-
-  return Number.NaN;
-}
-
-function cvssLevelFromNumericScore(score) {
-  if (!Number.isFinite(score) || score < 0) {
-    return "N/A";
-  }
-
-  if (score === 0) {
-    return "None";
-  }
-
-  if (score <= 3.9) {
-    return "Low";
-  }
-
-  if (score <= 6.9) {
-    return "Medium";
-  }
-
-  if (score <= 8.9) {
-    return "High";
-  }
-
-  if (score <= 10) {
-    return "Critical";
-  }
-
-  return "N/A";
-}
-
-function computeCvssScoreAndLevel(vulnDetails) {
-  const vector = extractCvssVector(vulnDetails);
-
-  if (!vector) {
-    return {
-      score: "N/A",
-      level: normalizeCvssLevel(vulnDetails?.database_specific?.severity)
-    };
-  }
-
-  const directScore = extractDirectCvssScore(vector);
-
-  if (Number.isFinite(directScore)) {
-    return {
-      score: directScore.toFixed(1),
-      level: cvssLevelFromNumericScore(directScore)
-    };
-  }
-
-  try {
-    const normalizedVector = normalizeVectorForScoring(vector);
-    const numericScore = Number(cvss.getScore(normalizedVector));
-
-    if (Number.isFinite(numericScore)) {
-      return {
-        score: numericScore.toFixed(1),
-        level: String(cvss.getRating(numericScore) ?? "N/A")
-      };
-    }
-  } catch {
-    return {
-      score: "N/A",
-      level: normalizeCvssLevel(vulnDetails?.database_specific?.severity)
-    };
-  }
-
-  return {
-    score: "N/A",
-    level: normalizeCvssLevel(vulnDetails?.database_specific?.severity)
-  };
+  return queryVulnerabilitiesBatch(packages, ecosystemConfig.osvEcosystem);
 }
 
 async function fetchCvssDataByGhsa(scannedPackages) {
@@ -348,13 +158,17 @@ async function fetchCvssDataByGhsa(scannedPackages) {
   await Promise.all(
     Array.from(ghsaIds).map(async (ghsaId) => {
       try {
-        const detailsUrl = `${OSV_VULN_DETAILS_BASE_URL}/${encodeURIComponent(ghsaId)}`;
-        const details = await fetchJson(detailsUrl);
-        scoreMap.set(ghsaId, computeCvssScoreAndLevel(details));
+        const details = await fetchVulnerabilityDetails(ghsaId);
+        const title = typeof details?.summary === "string" ? details.summary : "Titre indisponible";
+        scoreMap.set(ghsaId, {
+          ...computeCvssScoreAndLevel(details),
+          title
+        });
       } catch {
         scoreMap.set(ghsaId, {
           score: "N/A",
-          level: "N/A"
+          level: "N/A",
+          title: "Titre indisponible"
         });
       }
     })
@@ -378,24 +192,26 @@ function buildMarkdownTable(scannedPackages, cvssScoreByGhsa) {
       const ghsaId = typeof vuln?.id === "string" ? vuln.id : "ID inconnu";
       const cvssData = cvssScoreByGhsa.get(ghsaId) ?? {
         score: "N/A",
-        level: "N/A"
+        level: "N/A",
+        title: "Titre indisponible"
       };
 
       rows.push([
         escapeMarkdownCell(item.name),
         escapeMarkdownCell(item.version),
         escapeMarkdownCell(ghsaId),
+        escapeMarkdownCell(cvssData.title),
         escapeMarkdownCell(cvssData.score),
         escapeMarkdownCell(cvssData.level)
       ]);
     }
   }
 
-  const header = "| nom du package | version du package | identifiant GHSA | Score CVSS | Niveau CVSS |";
-  const separator = "| --- | --- | --- | --- | --- |";
+  const header = "| nom du package | version du package | identifiant GHSA | Titre de la vulnérabilité | Score CVSS | Niveau CVSS |";
+  const separator = "| --- | --- | --- | --- | --- | --- |";
 
   if (rows.length === 0) {
-    return [header, separator, "| - | - | Aucune vulnérabilité | N/A | N/A |"].join("\n");
+    return [header, separator, "| - | - | Aucune vulnérabilité | - | N/A | N/A |"].join("\n");
   }
 
   const body = rows.map((columns) => `| ${columns.join(" | ")} |`).join("\n");

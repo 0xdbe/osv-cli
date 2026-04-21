@@ -1,7 +1,5 @@
 # deps-dev-cli
 
-CLI Node.js avec une commande `vulnerability` qui vérifie les vulnérabilités connues d'un package npm et de ses dépendances transitives via deps.dev + OSV.
-
 ## Prérequis
 
 - Node.js 18+
@@ -10,17 +8,14 @@ CLI Node.js avec une commande `vulnerability` qui vérifie les vulnérabilités 
 
 ```bash
 npm install
-npm link
 ```
 
 ## Utilisation
 
 ```bash
-vulnerability <nom-package>
-vulnerability <nom-package> --version <version>
+node src/cli.js <nom-package> -v <version> -e <ecosysteme>
 ```
 
-Si `--version` n'est pas fourni, la version par défaut du package est résolue via deps.dev.
 
 La sortie inclut un tableau Markdown avec les colonnes:
 
